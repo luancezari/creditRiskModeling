@@ -1,0 +1,651 @@
+---
+title: "Credit Risk Modelling"
+author: "Luan Cézari Maria"
+date: "09/06/2020"
+output: pdf_document
+fig_crop: false
+header-includes:
+   - \usepackage{booktabs}
+   - \usepackage{float}
+   - \usepackage{colortbl}
+---
+
+```{r setup, include=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+if(!require(gmodels)) install.packages("gmodels", repos = "http://cran.us.r-project.org")
+library(gmodels)
+if(!require(ggcorrplot)) install.packages("ggcorrplot", repos = "http://cran.us.r-project.org")
+library(ggcorrplot)
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+library(gridExtra)
+if(!require(anomalize)) install.packages("anomalize", repos = "http://cran.us.r-project.org")
+library(anomalize)
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+library(ggpubr)
+if(!require(GGally)) install.packages("GGally", repos = "http://cran.us.r-project.org")
+library(GGally)
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+library(caret)
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+library(randomForest)
+if(!require(kableExtra)) install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+library(kableExtra)
+
+```
+
+```{r include=FALSE}
+#Import data
+raw_data <- read_csv("c:/Users/luanc/projects/creditRiskModeling/data/credit_train.csv")
+```
+
+# OVERVIEW
+The present work is the conclusion project of Harvardx Profissional Certificate in Data Science. The goal of project is build a model that predict if a customer will or not paid a loan through a bunch of feature. The raw dataset used contain 100514 individual observations and 19 columns been one the target variable and 18 the features. To build this, I first preprocess the data in order to deal with duplicated rows, redundant columns, missing data and other minors errors. Also, in preprocess phase, binarize two variables turning it from numerical to yes/no. After, I perform a analysis of each variable distribution and the relation of some of them. At end, I model the wrangled data using two methods, logistic regression and random forest, comment the obtained results and define future works.
+
+# ANALYSIS
+
+## Data exploration and cleaning
+
+At beginning we can look at the dataset dimension, first rows and columns types in order to obtain a first impression of it.
+
+\begin{center}
+\textbf{Dataset dimension}
+\end{center}
+```{r echo=FALSE}
+# Dataset dimension
+dim(raw_data) %>%
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+\begin{center}
+\textbf{First rows}
+\end{center}
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+# First look of data
+split(1:ncol(head(raw_data)), sort(rep_len(1:4, ncol(head(raw_data))))) %>%
+  map(~select(head(raw_data), .)) %>%
+  map(kable, booktabs = T) %>%
+  map(kable_styling, latex_options = c("striped", "bordered", "scale_down")) %>%
+  walk(print)
+```
+
+\begin{center}
+\textbf{Columns types}
+\end{center}
+
+```{r echo=FALSE}
+# Looking the type of data
+raw_data %>%
+  summarize_all(~class(.)) %>%
+  gather(value = Class) %>%
+  arrange(Class) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+Here we can percept that the raw dataset contains 100514 individual observations with 19 columns, been one the target variable and 18 features. Of these, 12 are numeric variables and 6 are character. Two of the character features, Loan ID and Customer ID, don't have any predictive power and so should be removed.  
+At next, we explore the missing data:
+
+```{r echo=FALSE}
+# Searching for missing data
+raw_data %>% 
+  summarize_all(~sum(is.na(.))) %>% 
+  gather(value = NAs) %>%
+  mutate(`NAs Proportion` = NAs/nrow(raw_data)) %>%
+  arrange(desc(NAs)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+Here we can see that there is a variable with more than 50% of the missing data. As it is a very large proportion, the best way to deal with this is to remove the column completely. We can also see that the other two lines with significant NAs have the same number of them and, therefore, it is possible that them comes from the same observations. If confirmed, we can continue removing the lines.
+
+```{r echo=FALSE}
+# Checking if the observations with missing credit score are the same with missing annual income
+raw_data %>% summarize(`Are the observations the same?` = identical(which(is.na(`Credit Score`)),
+                                                                    which(is.na(`Annual Income`)))) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+If we look closely at the distribution of Credit Score
+```{r echo=FALSE}
+summary(raw_data$`Credit Score`)
+
+raw_data %>% summarize(`number of credit score bigger than 850` = sum(raw_data$`Credit Score` > 850, na.rm = T)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+we see that there are 4551 credit scores greater than 850. As the maximum FICO score is 850, this is impossible and therefore we can interpret this as a human error. To resolve this, I divide the credit score above 850 to 10.  
+Next, I check if there's observations with Current Loan Amount bigger than Maximum Open Credit. As this is impossible, due to the fact that the current loan amount is a credit that has been opened, we can interpret this as an error. As we can't recover the correct information the best way to proceed is remove the respective rows.
+
+```{r}
+# Checking if there's observations with Current Loan Amount bigger than Maximum Open Credit
+raw_data %>% 
+  summarize(n = sum(`Current Loan Amount` > `Maximum Open Credit`, na.rm = TRUE)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+I will now deal with bankruptcies, tax burdens and number of appeals from credit problems. I start by looking at the distribution of these variables.
+
+```{r echo=FALSE}
+# Cheking the distribution of number of credit problems
+rbind("Credit Problems" = table(raw_data$`Number of Credit Problems`),
+      "proportion" = round(prop.table(table(raw_data$`Number of Credit Problems`)),3)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+
+# Cheking the distribution of Tax Liens
+rbind("Tax Liens" = table(raw_data$`Tax Liens`),
+      "proportion" = round(prop.table(table(raw_data$`Tax Liens`)), 3)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+
+# Cheking the distribution of Bankruptcies
+rbind("Bankruptcies" = table(raw_data$Bankruptcies),
+      "proportion" = round(prop.table(table(raw_data$Bankruptcies)), 3)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+Here we can see that there are few observations with a value greater than 2 in any of these variables. We can then consider the binarization of this, making the variables yes / no instead of numeric. We can also see that bankruptcies are credit problems and there are few individuals with credit problems who have not gone bankrupt. Looking at this relationship numerically, as we do below, I can conclude that the variable Bankruptcies is redundant and can be removed with almost no loss of predictability.
+
+```{r echo=FALSE}
+# Checking how much observations have credit problems and not have bankruptcies historic 
+raw_data %>%
+  summarize(n = sum(Bankruptcies == 0 & `Number of Credit Problems` > 0, na.rm = T),
+            proportion = sum(Bankruptcies == 0 & `Number of Credit Problems` > 0, na.rm = T)/length(na.omit(`Number of Credit Problems`))) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+
+Next I look for the unique data in each column:
+```{r echo=FALSE}
+# Counting unique data
+raw_data %>%
+  summarize_all(~n_distinct(., na.rm = TRUE)) %>%
+  gather(value = uniques) %>%
+  arrange(desc(uniques)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+```
+Here it's possible to perception that the Loan ID number is less than the number of observations. This indicates that there are duplicate lines and they must be removed.
+Now, we look at the unique values of categorical features, excluding Loan ID and Customer ID:
+```{r echo=FALSE}
+# Looking at unique values of categorical columns excluding Loan ID and Customer ID
+list(
+  "Loan Status" = raw_data %>% pull(`Loan Status`) %>% unique(),
+  "Term" = raw_data %>% pull(`Term`) %>% unique(),
+  "Home Ownership" = raw_data %>% pull(`Home Ownership`) %>% unique(),
+  "Years in current job" = raw_data %>% pull(`Years in current job`) %>% unique(),
+  "Purpose" = raw_data %>% pull(`Purpose`) %>% unique())
+```
+Here I can see many problems that need to be solved.  
+Initially, "Residential mortgage" and "Termortgage" in "Domestic property" mean the same and, therefore, one must be converted into the other.  
+In "Years of current work", there is a character value "n / a" that must be converted to NA.
+In "Purpose", there are two different "others", one with the lowercase O and the other with the uppercase, both need to be combined into one. In addition, there is a "commercial loan" and a "small_business". Since "small business loan" is a type of "commercial loan" and we cannot confirm whether or not there is a small business in"commercial loan", it is good to convert both into a single value.  
+I finish by removing any remaining NA lines and converting character columns into factor.
+
+```{r include=FALSE, fig.align="center"}
+wrangled_data <- raw_data %>%
+  select(-`Customer ID`,
+         -`Months since last delinquent`,
+         -Bankruptcies,
+         -`Loan ID`) %>%
+  mutate(`Credit Score` = ifelse(`Credit Score` > 850,
+                                 `Credit Score`/10,
+                                 `Credit Score`),
+         `Home Ownership` = ifelse(`Home Ownership` == "HaveMortgage",
+                                   "Home Mortgage",
+                                   `Home Ownership`),
+         `Years in current job` = ifelse(`Years in current job` == "n/a",
+                                         NA,
+                                         `Years in current job`),
+         Purpose = ifelse(Purpose == "other",
+                          "Other",
+                          Purpose),
+         Purpose = ifelse(Purpose == "small_business",
+                          "Business Loan",
+                          Purpose),
+         `Historic of Credit Problems` = ifelse(`Number of Credit Problems` == 0, 
+                                                "No",
+                                                "Yes")) %>%
+  filter(!is.na(`Loan Status`),
+         !is.na(`Annual Income`),
+         raw_data$`Current Loan Amount` < raw_data$`Maximum Open Credit`,
+         !is.na(`Years in current job`),
+         !is.na(`Tax Liens`)) %>%
+  mutate(`Tax Liens` = ifelse(`Tax Liens` == 0,
+                              "No",
+                              "Yes")) %>%
+  distinct() %>%
+  select(-`Number of Credit Problems`)
+
+# Converting character columns into factors
+wrangled_data[sapply(wrangled_data, is.character)] <- lapply(wrangled_data[sapply(wrangled_data, is.character)], as.factor)
+```
+
+Now, after apply all of these transformations, I evaluate the resulting dataset. 
+
+```{r echo=FALSE}
+# Evaluating  class, uniques and NAs of wrangled data
+Class <- wrangled_data %>%
+  summarize_all(~class(.)) %>%
+  gather(value = Class)
+nas <- wrangled_data %>% 
+  summarize_all(~sum(is.na(.))) %>% 
+  gather(value = NAs)
+uniques <- wrangled_data %>%
+  summarize_all(~n_distinct(.)) %>%
+  gather(value = Uniques)
+Class %>%
+  left_join(uniques, by = "key") %>%
+  left_join(nas, by = "key") %>%
+  arrange(desc(Class), desc(Uniques)) %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+rm(Class, uniques, nas)
+
+# Evaluating if there's credit score with decimal places
+wrangled_data %>% summarize(`none credit score with decimal` = identical(`Credit Score`,
+                                      round(`Credit Score`))) %>% gather() %>% 
+ kable() %>% 
+ kable_styling(latex_options = c("striped", "bordered"))
+
+# Evaluating the dimention of resulting dataset
+dim(wrangled_data)
+```
+
+All looks to be correct. The wrangled data has 44112 observations and 15 columns been 14 features.  
+After all these transformations, we need to conclude this stage of the process by creating the train and test set through the wrangled data, as shown below:
+
+```{r echo=FALSE}
+set.seed(1)
+test_index <- createDataPartition(wrangled_data$`Loan Status`, 
+                                  times = 1, 
+                                  p = 0.2, 
+                                  list = FALSE)[,1]
+
+train_set <- wrangled_data[-test_index,]
+
+test_set <- wrangled_data[test_index,]
+```
+
+This process is important because it helps to avoid excessive adjustments in the later modeling phase. I choose to divide it as 80% of the data in the training set and 20% of the data in the test set, because using more data in the train set reduces the variability of the model result and I use 80% of the train set instead of 90% because it makes the training stage computationally less intensive.
+
+## Data visualization
+In this section, we will visually explore the distribution of variables and the relationship between some of them in the training set. We will start by visualizing the distribution of the target variable, then we will analyze the distribution and the proportion of the discrete variables, the continuous variables and, finally, we will analyze the relationship between them.
+
+```{r include=FALSE}
+# create categorical distribution plot function
+barplt <- function(variable){
+  variable <- enquo(variable)
+  train_set %>%
+    ggplot(aes(x = !!variable, fill = `Loan Status`)) +
+    geom_bar(position = "stack") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none")
+  }
+
+# create categorical porportion plot function
+barplt_prop <- function(variable){
+  dta = data.frame(yi = 0.727)
+  variable <- enquo(variable)
+  train_set %>%
+    ggplot(aes(x = !!variable, fill = `Loan Status`)) +
+    geom_bar(position = "fill") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none") +
+    geom_hline(data = dta,
+               aes(yintercept = yi,
+                   linetype = factor(yi)), size = 1) +
+    scale_linetype_manual(name = "Overall proportion", 
+                          values = "dashed", 
+                          labels = "") +
+    guides(fill = guide_legend(override.aes = list(linetype = "blank")))
+}
+
+# Create density plot without outliers function
+dty_plot <- function(variable){
+  variable <- enquo(variable)
+  train_set %>%
+    anomalize(!!variable, method = "iqr") %>%
+    filter(anomaly == "No") %>%
+    ggplot(aes(!!variable,
+               fill = `Loan Status`)) +
+    geom_density(alpha = 0.5) +
+    labs(x = "",
+         y = "",
+         title = variable) +
+    theme(legend.position = "none",
+          plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank())
+}
+```
+
+### Target variable
+
+```{r}
+CrossTable(train_set$`Loan Status`)
+```
+
+Here we can see that there is a much greater distribution of "Fully Paid" than "Charged Off". This difference can lead to inaccurate results during the training phase and will therefore be taken into account.
+
+### Categorical features distribution
+
+#### Purpose
+
+```{r echo=FALSE, fig.align="center"}
+# Purpose feature
+annotate_figure(ggarrange(
+  train_set %>%
+    mutate(Purpose = forcats::fct_reorder(.f = Purpose,
+                                          .x = `Loan Status`,
+                                          .fun = function(.x) mean(.x == "Charged Off"))) %>%
+    ggplot(aes(x = Purpose, 
+               fill = `Loan Status`)) +
+    geom_bar(position = "dodge") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none"),
+  train_set %>% 
+    mutate(Purpose = forcats::fct_reorder(.f = Purpose,
+                                          .x = `Loan Status`,
+                                          .fun = function(.x) mean(.x == "Charged Off"))) %>%
+    ggplot(aes(x = Purpose, 
+               fill = `Loan Status`)) +
+    geom_bar(position = "fill") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    geom_hline(aes(yintercept = 0.727,
+                   linetype = "Fully Paid"), size = 1) +
+    scale_linetype_manual(name = "Overall proportion", 
+                          values = c(1,1)),
+  nrow = 2, common.legend = TRUE, legend = "bottom", align = "v"),
+  top = "Purpose")
+
+```
+
+Here we can see that almost all of the training set loans were for debt consolidation. In terms of proportion to status, some purposes such as business loans and moving tend to have a higher proportion of Charged Off loans than the whole as a whole while others such as educational expenses and buy a car tend to a greater proportion of Fully Paid than that reference.
+
+#### Years in current job
+
+```{r echo=FALSE, fig.align="center"}
+# Years in current job feature
+annotate_figure(ggarrange(
+  train_set %>%
+    mutate(`Years in current job` = factor(`Years in current job`,
+                                           levels = c("< 1 year", "1 year", "2 years", "3 years", 
+                                                      "4 years", "5 years", "6 years", "7 years",
+                                                      "8 years","9 years", "10+ years"))) %>%
+    ggplot(aes(x = `Years in current job`, 
+               fill = `Loan Status`)) +
+    geom_bar(position = "dodge") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none"),
+  train_set %>%
+    mutate(`Years in current job` = factor(`Years in current job`,
+                                           levels = c("< 1 year", "1 year", "2 years", "3 years", 
+                                                      "4 years", "5 years", "6 years", "7 years",
+                                                      "8 years","9 years", "10+ years"))) %>%
+    ggplot(aes(x = `Years in current job`, 
+               fill = `Loan Status`)) +
+    geom_bar(position = "fill") +
+    theme(axis.text.x = element_text(angle = 45,
+                                     hjust = 1),
+          plot.title = element_text(hjust = 0.5),
+          legend.position = "none") +
+    labs(x = "",
+         y = "",
+         title = "") +
+    geom_hline(aes(yintercept = 0.727,
+                   linetype = "Fully Paid"), size = 1) +
+    scale_linetype_manual(name = "Overall proportion", 
+                          values = c(1,1)),
+  nrow = 2, common.legend = TRUE, legend = "bottom", align = "v"),
+  top = "Years in current job")
+```
+
+Here we can see that the vast majority of loans were made by people aged 10 or over in their current job. The proportion of Loan Status between the different periods was not significant.
+
+#### Term
+```{r echo=FALSE, fig.align="center"}
+# Term feature
+annotate_figure(ggarrange(barplt(Term),
+                          barplt_prop(Term),
+                          ncol = 2, common.legend = TRUE, legend = "bottom"),
+                top = "Term")
+```
+Here we can see that the vast majority of loans were made in the short term, being proportionately more paid than those made in the long term.
+
+#### Tax Liens
+
+```{r echo=FALSE, fig.align="center"}
+# Tax Liens feature
+annotate_figure(ggarrange(barplt(`Tax Liens`),
+                          barplt_prop(`Tax Liens`),
+                          ncol = 2, common.legend = TRUE, legend = "bottom"),
+                top = "Tax Liens")
+```
+Only a small, almost insignificant group of people had tax liens problems. These proportionally less honored the loan contracts.
+
+#### Historic of Credit Problems
+
+```{r echo=FALSE, fig.align="center"}
+# Historic of Credit Problems feature
+annotate_figure(ggarrange(barplt(`Historic of Credit Problems`),
+                          barplt_prop(`Historic of Credit Problems`),
+                          ncol = 2, common.legend = TRUE, legend = "bottom"),
+                top = "Historic of Credit Problems")
+```
+
+Most borrowers have never had credit problems. The proportion of individuals who have honored loan agreements and have a history of credit problems is statistically the same as those who do not have the same history.
+
+#### Home Ownership
+```{r echo=FALSE, fig.align="center"}
+# Home Ownership feature
+annotate_figure(ggarrange(barplt(`Home Ownership`),
+                          barplt_prop(`Home Ownership`),
+                          ncol = 2, common.legend = TRUE, legend = "bottom"),
+                top = "Home Ownership")
+```
+
+The smallest part of the borrowers pays a mortgage while the smallest part of them own their own home. Proportionally, mortgage-paying customers tend to pay more on their loans than the general average, while those who live on rent tend to pay less.
+
+### Continuous features distribution
+
+```{r echo=FALSE, fig.align="center"}
+  # Plot density of continuous features without outliers
+ggarrange(
+  dty_plot(`Current Credit Balance`),
+  dty_plot(`Monthly Debt`),
+  dty_plot(`Annual Income`),
+  dty_plot(`Years of Credit History`),
+  ncol = 2, nrow = 2, common.legend = TRUE, legend = "bottom")
+
+ggarrange(
+  dty_plot(`Number of Open Accounts`),
+  dty_plot(`Maximum Open Credit`),
+  dty_plot(`Credit Score`),
+  dty_plot(`Current Loan Amount`),
+  ncol = 2, nrow = 2, common.legend = TRUE, legend = "bottom")
+```
+
+Here we can see that for most continuous variables there is no significant difference in the distribution of those who paid the loans and those who did not. Only the annual income, credit score and current loan amount differ significantly.  
+The proportion of "Fully Paid" becomes greater after a certain point in the variables annual income, years of credit history, maximum open credit and credit score, with the proviso that in the case of credit score there are two local maximum points where the distribution of "Fully Paid" is greater with a slope in the middle where the proportion of "Charged Off" stands out.
+
+### Relation between variables
+
+#### Correlation matrix of continuous variables
+
+```{r echo=FALSE, fig.align="center"}
+##### Correlation matrix of continuous variables #####
+numeric_train_set <- train_set %>%
+  select(-`Loan Status`,
+         -`Term`,
+         -`Years in current job`,
+         -`Home Ownership`,
+         -Purpose,
+         -`Tax Liens`,
+         -`Historic of Credit Problems`)
+trainSet_cor <- cor(numeric_train_set)
+ggcorrplot(trainSet_cor,
+           hc.order = TRUE,
+           lab = TRUE)
+rm(numeric_train_set, trainSet_cor)
+```
+Here it is noticeable that the vast majority of variables have a positive correlation with each other, with the exception of the credit score variable, which has a negative correlation with the vast majority of the others. The variables monthly debt and annual income are those that tend to have the highest correlation with the others, but none of them are correlated enough to influence negatively the efficiency of the models.
+
+#### Cross-table between historic of credit problems and tax liens
+
+```{r echo=FALSE}
+CrossTable(train_set$`Historic of Credit Problems`, 
+           train_set$`Tax Liens`,
+           prop.chisq = F)
+```
+
+It is notable that there are no individuals who have had tax liens problems and have had no history of credit problems. It is also notable that very few have had tax liens problems and a history of credit problems at the same time.
+
+## Modeling
+
+### Adjusting the target variable
+Before run the predict models we need to do some minor adjusts in target variable. First, we need add a underline between the two words of each unique value, obtaining the levels "Fully_Paid" and "Chaged Off". This stage is necessary due to especifications of the functions used. Then, we need to change the order of factors putting the "Fully_Paid" as the first level, so it will be automaticaly setted as the positive class in the models.
+
+```{r include=FALSE}
+# Adapting `Loan Status` and Set Fully_Paid as first factor level
+
+train_set <- train_set %>% 
+  mutate(`Loan Status` = factor(`Loan Status`, 
+                                levels = c("Fully Paid", "Charged Off")))
+
+test_set <- test_set %>% 
+  mutate(`Loan Status` = factor(`Loan Status`, 
+                                levels = c("Fully Paid", "Charged Off")))
+
+levels(train_set$`Loan Status`) <- c("Fully_Paid", "Charged_Off")
+levels(test_set$`Loan Status`) <- c("Fully_Paid", "Charged_Off")
+```
+
+
+### Choosing parameter evaluation metric
+
+As has been seen in data visualization there's a high prevalence of "Fully Paid" over "Charged Off". This characteristic of target variable can lead to a model with big accuracy even with a lack of capacity to distinguish between two possible outcomes. To overcome this I choose to use ballance accuracy instead of accuracy as metric to fit the models.
+
+```{r echo=TRUE}
+# Create balanced accuracy function
+baSummary <- function(data, lev = NULL, model = NULL){
+  out <- (sensitivity(data$pred, data$obs)+specificity(data$pred, data$obs))/2
+  c(balancedAccuracy = out)
+}
+```
+
+
+### Logistic regression model 1
+
+The logistic regression is one of the most common classification model used due to his simplicity and low computational intensity. We will try to model a logistic regression using all avaliable features.  
+We define the outcome Y as 1 for "Fully Paid" and for a vector of predictors ***X*** we estimate the conditional probability $Pr(Y = 1 | X_{n} = x_{n}) = \beta_{0} + \sum_{n=1}^{k} X_{n}\beta_{n}$. Due to the fact that this linear function can take values larger than 1 we need to use the logistic transformation $g(p) = log\frac{p}{1-p}$ obtaining the final model $g\{Pr(Y = 1 | X_{n} = x_{n})\} = \beta_{0} + \sum_{n=1}^{k} X_{n}\beta_{n}$. We use, then, the maximum likelihood estimate to estimate the $\beta$.
+
+```{r echo=TRUE}
+glm_fit <- train(`Loan Status` ~ .,
+                 data = train_set, 
+                 method = "glm",
+                 family = "binomial")
+```
+
+Doing so we obtain te results
+```{r echo=FALSE}
+summary(glm_fit)
+```
+
+### Logistic regression model 2
+We can try to improve this model removing the features with p-value bigger than 0.01 obtaining the model below:
+
+```{r}
+glm_fit2 <- train(`Loan Status` ~ `Current Loan Amount` + `Term` + `Credit Score` + `Annual Income` + `Purpose` + `Monthly Debt` + `Number of Open Accounts` + `Home Ownership`,
+                 data = train_set, 
+                 method = "glm",
+                 family = "binomial")
+```
+
+```{r echo=FALSE}
+summary(glm_fit2)
+```
+
+### Random Forest Model
+
+The random forest is a supervised learning algorithm. He works by creating a set of decision trees using the bagging method. The benefits of this are that the average of multiple decision trees reduces instability and improves accuracy. Now, I will build a random forest model using all available resources.
+
+```{r warning=FALSE}
+# Create train control
+train.control <- trainControl(method = "cv", 
+                              number = 5, 
+                              p = .8,
+                              classProbs = TRUE,
+                              summaryFunction = baSummary)
+
+# Training model
+set.seed(1)
+rf_fit <- train(`Loan Status` ~ .,
+                data = train_set, 
+                method = "rf",
+                metric = "balancedAccuracy",
+                trControl = train.control,
+                tuneGrid = data.frame(mtry = seq(500, 1000, 250)),
+                importance = TRUE)
+```
+
+# RESULTS
+##  Logistic regression model 1
+```{r echo=FALSE}
+# Evaluating model
+confusionMatrix(predict(glm_fit, test_set), test_set$`Loan Status`)
+```
+
+The logistic regression model 1 clearly failed to differentiate between loans that would potentially be paid in full and loans that would not be. Most of the loans in the training data were predicted to be fully paid and therefore 98.4% of Fully paid loans were predicted correctly while only 4.9% of Charged off were. There may be several causes of this behavior, ranging from the variables considered in the model to the lack of flexibility of the linear regression itself.
+
+##  Logistic regression model 2
+
+```{r echo=FALSE}
+# Evaluating model
+confusionMatrix(predict(glm_fit2, test_set), test_set$`Loan Status`)
+```
+
+After removing variables with a p-value greater than 0.01, a worsening of the model's ability to correctly predict the status of loans in training data was observed. In the second model, a sensitivity of 0.984 and a specificity of 0.482 were observed. The difference in performance between the two models, however, was very small and can be easily attributed to chance. After these two models, we can conclude that logistic regression is too rigid to adapt to the data, requiring a more complex approach.
+
+## Random forest model
+```{r echo=FALSE}
+# Evaluating model
+confusionMatrix(predict(rf_fit, test_set), test_set$`Loan Status`)
+```
+
+Using the random forest approach with all variables we can see an improvement in performance. Although the sensitivity was lower than the logistic regression, reaching 0.9567, the specificity was higher, at 0.097, which is reflected in an improvement in balanced accuracy.
+
+# CONCLUSION
+In the present work, we analyze a set of loan data and try to build a model capable of predicting whether future loans will be paid or not. After a long process of data wrangling and analysis of variables, we built and evaluated three possible models, two logistic regressions and a random forest. The final conclusion is that the applied models did not have a satisfactory result and further studies are needed in order to develop something that is applicable in the real world.  
+Several reasons can be raised as to why the model did not perform properly and with that we were able to define the path for future studies. First, given the way in which the data on fully paid and charged off loans are mixed, I can conclude that a larger set of observations would be necessary in order to properly train the model. In addition, for the same reason, more complex and computationally more demanding models such as deep neural networks and ensemble models can be applied, with the expectation of obtaining better results. A third point is that the losses of each incorrectly detected fully paid loan are not equal to the losses of each incorrectly detected charged off loan and, therefore, the weights given to these errors in the final assessment metric should not be the same. If we had information on the difference between potential losses, we could use the F1 score with an appropriate beta as a measure of accuracy and that would certainly lead to better models.
